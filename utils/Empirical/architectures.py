@@ -19,7 +19,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # cifar_resnet20 - a 20-layer residual network sized for CIFAR
 # cifar_resnet110 - a 110-layer residual network sized for CIFAR
 ARCHITECTURES = ["lenet", "resnet50", "mnist_resnet20", "cifar_resnet20", "cifar_resnet110"]
-
+# dataset: cifar10 | architecture: cifar_resnet20 | RTX-3070
 def get_architecture(arch: str, dataset: str) -> torch.nn.Module:
     """ Return a neural network (with random weights)
 

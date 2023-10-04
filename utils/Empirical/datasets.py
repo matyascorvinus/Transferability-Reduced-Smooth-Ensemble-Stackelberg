@@ -89,7 +89,7 @@ def _imagenet(split: str) -> Dataset:
 	if split == "train":
 		subdir = os.path.join(dir, "train")
 		transform = transforms.Compose([
-			transforms.RandomSizedCrop(224),
+			transforms.RandomResizedCrop(224),
 			transforms.RandomHorizontalFlip(),
 			transforms.ToTensor()
 		])

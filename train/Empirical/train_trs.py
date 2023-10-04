@@ -4,6 +4,10 @@ from torch.utils.data import DataLoader
 import torch.optim as optim
 import argparse
 from tensorboardX import SummaryWriter
+ 
+from tqdm import tqdm
+from collections import OrderedDict
+import numpy as np
 
 import sys
 import os
@@ -15,10 +19,11 @@ sys.path.append(parentdir)
 from utils.Empirical.architectures import ARCHITECTURES
 from utils.Empirical.datasets import DATASETS
 
-from utils.Empirical.utils_ensemble import AverageMeter, accuracy, test, copy_code, requires_grad_, evaltrans
-from utils.Empirical.datasets import get_dataset
+from utils.Empirical.utils_ensemble import AverageMeter, accuracy, test, copy_code, requires_grad_, evaltrans, arr_to_str, proj_onto_simplex
+from utils.Empirical.datasets import get_dataset, get_normalize_layer
+from utils.Empirical.attack import arc_attack
 from utils.Empirical.architectures import get_architecture
-from train.Empirical.trainer import TRS_Trainer
+from train.Empirical.trainer import TRS_Trainer 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -59,6 +64,14 @@ parser.add_argument('--plus-adv', action='store_true')
 parser.add_argument('--adv-eps', default=0.2, type=float)
 parser.add_argument('--init-eps', default=0.1, type=float)
 
+# OSP params
+parser.add_argument('--osp_batch_size', "--obm", type=int, default=512) # batch size used for osp
+parser.add_argument('--osp_data_len', type=int, default=2048) # subset of trainset used for osp
+parser.add_argument('--osp_epochs', "--oe", type=int, default=10)
+parser.add_argument('--osp_freq', "--of", type=int, default=10)
+parser.add_argument('--osp_lr_max', "--olr", type=float, default=10) 
+parser.add_argument('--debug', "--debug", type=int, default=0) 
+
 args = parser.parse_args()
 
 if args.adv_training:
@@ -91,18 +104,28 @@ def main():
 
     train_dataset = get_dataset(args.dataset, 'train')
     test_dataset = get_dataset(args.dataset, 'test')
+    
     pin_memory = (args.dataset == "imagenet")
     train_loader = DataLoader(train_dataset, shuffle=True, batch_size=args.batch,
                               num_workers=args.workers, pin_memory=pin_memory)
     test_loader = DataLoader(test_dataset, shuffle=False, batch_size=args.batch,
                              num_workers=args.workers, pin_memory=pin_memory)
-
+    subset = list(range(0, args.osp_data_len))
+    ospset = torch.utils.data.Subset(get_dataset(args.dataset, 'train'), subset)        
+    osp_loader = DataLoader(
+        dataset=ospset,
+        batch_size=args.osp_batch_size,
+        shuffle=False,
+        pin_memory=pin_memory,
+        num_workers=args.workers,
+    )
     model = []
     for i in range(args.num_models):
         submodel = get_architecture(args.arch, args.dataset)
         submodel = nn.DataParallel(submodel)
         model.append(submodel)
     print("Model loaded")
+    alpha = torch.ones(args.num_models, device='cuda') / args.num_models
 
     criterion = nn.CrossEntropyLoss().cuda()
 
@@ -129,8 +152,9 @@ def main():
 
     for epoch in range(args.epochs):
 
-        TRS_Trainer(args, train_loader, model, criterion, optimizer, epoch, device, writer)
-        test(test_loader, model, criterion, epoch, device, writer)
+        TRS_Trainer(args, train_loader, model, criterion, optimizer, epoch, device, osp_loader, scheduler, writer, alpha )
+        print('alpha', alpha)
+        test(test_loader, model, criterion, epoch, device, writer, alpha = alpha, required_alpha=True)
         evaltrans(args, test_loader, model, criterion, epoch, device, writer)
 
         scheduler.step(epoch)

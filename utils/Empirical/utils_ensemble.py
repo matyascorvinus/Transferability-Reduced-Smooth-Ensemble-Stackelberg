@@ -12,6 +12,7 @@ sys.path.append(parentdir)
 from tqdm import tqdm
 import PIL.Image
 from torchvision.transforms import ToTensor
+import itertools
 import io
 import matplotlib
 matplotlib.use('Agg')
@@ -199,12 +200,12 @@ def evaltrans(args, loader, models, criterion, epoch, device, writer=None):
 	for i in range(len(models)):
 		curmodel = models[i]
 		adversary = LinfPGDAttack(
-			curmodel, loss_fn=criterion, eps=args.adveps,
-			nb_iter=50, eps_iter=args.adveps / 10, rand_init=True, clip_min=0., clip_max=1.,
+			curmodel, loss_fn=criterion, eps=args.adv_eps,
+			nb_iter=50, eps_iter=args.adv_eps / 10, rand_init=True, clip_min=0., clip_max=1.,
 			targeted=False)
 		adv.append(adversary)
 
-	trans = np.zeros((3, 3))
+	trans = np.zeros((len(models), len(models)))
 	for i in range(len(models)):
 		test_iter = tqdm(loader, desc='Batch', leave=False, position=2)
 		_, label, pred, advpred = attack_whole_dataset(adv[i], test_iter, device="cuda")
@@ -227,7 +228,7 @@ def evaltrans(args, loader, models, criterion, epoch, device, writer=None):
 	writer.add_scalar('test/cos12', cos12_losses.avg, epoch)
 
 
-def test(loader, models, criterion, epoch, device, writer=None, print_freq=10):
+def test(loader, models, criterion, epoch, device, writer=None, print_freq=10, alpha = 1/3, required_alpha = False):
 	batch_time = AverageMeter()
 	data_time = AverageMeter()
 	losses = AverageMeter()
@@ -239,7 +240,7 @@ def test(loader, models, criterion, epoch, device, writer=None, print_freq=10):
 	for i in range(len(models)):
 		models[i].eval()
 
-	ensemble = Ensemble(models)
+	ensemble = Ensemble(models, alpha, required_alpha)
 	with torch.no_grad():
 		for i, (inputs, targets) in enumerate(loader):
 			# measure data loading time
@@ -274,3 +275,30 @@ def test(loader, models, criterion, epoch, device, writer=None, print_freq=10):
 		writer.add_scalar('accuracy/test@1', top1.avg, epoch)
 		writer.add_scalar('accuracy/test@5', top5.avg, epoch)
 
+def arr_to_str(x):
+    M = len(x)
+    x_str = "["
+    for m in range(M-1):
+        x_str += "{:.4f}, ".format(x[m])
+
+    x_str += "{:.4f}]".format(x[M - 1])
+    return x_str
+
+
+def proj_onto_simplex(x):
+    N = len(x)
+    y = np.sort(x)[::-1]
+    rho = -1
+    for i in range(N):
+        q = y[i] + (1 - y[:i + 1].sum()) / (1 + i)
+        if q > 0:
+            rho = i
+    l = (1 - y[:rho+1].sum()) / (rho + 1)
+    x_hat = np.zeros(N)
+    for i in range(N):
+        if x[i] + l > 0:
+            x_hat[i] = x[i] + l
+    return x_hat
+
+def Combinator(length_models, combination_size = 2):
+	return np.array(list(itertools.combinations(range(length_models), combination_size)))
