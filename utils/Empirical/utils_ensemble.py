@@ -172,9 +172,13 @@ def evaltrans(args, loader, models, criterion, epoch, device, writer=None):
 	for i in range(len(models)):
 		models[i].eval()
 
-	cos01_losses = AverageMeter()
-	cos02_losses = AverageMeter()
-	cos12_losses = AverageMeter()
+	cos_losses_array = []
+	list_of_combination = Combinator(args.num_models)
+	for index, combination in list_of_combination:
+		cos_losses_array.append(AverageMeter())
+	# cos01_losses = AverageMeter()
+	# cos02_losses = AverageMeter()
+	# cos12_losses = AverageMeter()
 
 	for _, (inputs, targets) in enumerate(loader):
 
@@ -189,12 +193,20 @@ def evaltrans(args, loader, models, criterion, epoch, device, writer=None):
 			grad = grad.flatten(start_dim=1)
 			grads.append(grad)
 
-		cos01 = Cosine(grads[0], grads[1])
-		cos02 = Cosine(grads[0], grads[2])
-		cos12 = Cosine(grads[1], grads[2])
-		cos01_losses.update(cos01.item(), batch_size)
-		cos02_losses.update(cos02.item(), batch_size)
-		cos12_losses.update(cos12.item(), batch_size)
+		cos_loss = 0
+		cos_array = []
+		for combination in list_of_combination:
+			cos_array.append(
+				Cosine(grads[combination[0]], grads[combination[1]]))
+		cos_loss = sum(cos_array) / len(cos_array)
+		# cos01 = Cosine(grads[0], grads[1])
+		# cos02 = Cosine(grads[0], grads[2])
+		# cos12 = Cosine(grads[1], grads[2])
+		# cos01_losses.update(cos01.item(), batch_size)
+		# cos02_losses.update(cos02.item(), batch_size)
+		# cos12_losses.update(cos12.item(), batch_size)
+		for index, combination in list_of_combination:
+			cos_losses_array[index].update(cos_array[index].item(), batch_size)
 
 	adv = []
 	for i in range(len(models)):
@@ -223,9 +235,12 @@ def evaltrans(args, loader, models, criterion, epoch, device, writer=None):
 	image = PIL.Image.open(plot_buf)
 	image = ToTensor()(image)
 	writer.add_image('TransferImage', image, epoch)
-	writer.add_scalar('test/cos01', cos01_losses.avg, epoch)
-	writer.add_scalar('test/cos02', cos02_losses.avg, epoch)
-	writer.add_scalar('test/cos12', cos12_losses.avg, epoch)
+	# writer.add_scalar('test/cos01', cos01_losses.avg, epoch)
+	# writer.add_scalar('test/cos02', cos02_losses.avg, epoch)
+	# writer.add_scalar('test/cos12', cos12_losses.avg, epoch)
+	for index, combination in list_of_combination:
+		writer.add_scalar('train/cos_{}'.format(combination),
+							cos_losses_array[index].avg, epoch)
 
 
 def test(loader, models, criterion, epoch, device, writer=None, print_freq=10, alpha = 1/3, required_alpha = False):
@@ -286,19 +301,20 @@ def arr_to_str(x):
 
 
 def proj_onto_simplex(x):
-    N = len(x)
-    y = np.sort(x)[::-1]
-    rho = -1
-    for i in range(N):
-        q = y[i] + (1 - y[:i + 1].sum()) / (1 + i)
-        if q > 0:
-            rho = i
-    l = (1 - y[:rho+1].sum()) / (rho + 1)
-    x_hat = np.zeros(N)
-    for i in range(N):
-        if x[i] + l > 0:
-            x_hat[i] = x[i] + l
-    return x_hat
+	N = len(x)
+	y_sorted, _ = torch.sort(x, descending=True)
+	y = y_sorted # torch.sort(x)[::-1]
+	rho = -1
+	for i in range(N):
+		q = y[i] + (1 - torch.sum(y[:i + 1])) / (1 + i)
+		if q > 0:
+			rho = i
+	l = (1 - torch.sum(y[:rho+1])) / (rho + 1)
+	x_hat = torch.zeros(N, device='cuda')
+	for i in range(N):
+		if x[i] + l > 0:
+			x_hat[i] = x[i] + l
+	return x_hat
 
 def Combinator(length_models, combination_size = 2):
 	return np.array(list(itertools.combinations(range(length_models), combination_size)))

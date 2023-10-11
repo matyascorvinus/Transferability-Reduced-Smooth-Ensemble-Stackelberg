@@ -1,6 +1,6 @@
 
 
-from utils.Empirical.attack import arc_attack
+from utils.Empirical.attack import arc_attack, apgd_attack
 from utils.Empirical.datasets import get_dataset, get_normalize_layer
 from utils.Empirical.utils_ensemble import AverageMeter, accuracy, test, copy_code, requires_grad_, evaltrans, arr_to_str, proj_onto_simplex
 import numpy as np
@@ -32,10 +32,10 @@ sys.path.append(parentdir)
 # making the adversarial example too obvious. The perturbation is initialized to zero, and the number of iterations
 
 
-def osp_iter(epoch, alpha, lr_scheduler, osp_loader, model_ls, normalize, osp_lr_max):
+def osp_iter(epoch, alpha, lr_scheduler, osp_loader, model_ls, normalize, osp_lr_max, attack='apgd', debug_mode=False):
 
     M = len(alpha)
-    err = np.zeros(M)
+    err = torch.zeros(M, device='cuda')
     n = 0
     pbar = tqdm(osp_loader)
     osp_lr_init = osp_lr_max * lr_scheduler.get_lr()[0]
@@ -44,8 +44,14 @@ def osp_iter(epoch, alpha, lr_scheduler, osp_loader, model_ls, normalize, osp_lr
     pbar.set_description("OSP:{:3d} epoch lr {:.4f}".format(epoch, curr_lr))
     for batch_idx, (inputs, targets) in enumerate(pbar):
         inputs, targets = inputs.cuda(), targets.cuda()
-        adv_inp = arc_attack(model_ls, inputs, targets, alpha,
-                             8 / 255.0, 8 / 255.0, 10, normalize=normalize, g=2)
+        # adv_inp = arc_attack(model_ls, inputs, targets, alpha,
+        #                      8 / 255.0, 8 / 255.0, 10, normalize=normalize, g=2)
+        if attack == 'apgd':
+            adv_inp = apgd_attack(model_ls, inputs, targets, alpha,
+                                    8 / 255.0, 2 / 255.0, 10, normalize=normalize)
+        if attack == 'arc':
+            adv_inp = arc_attack(model_ls, inputs, targets, alpha,
+                                    8 / 255.0, 8 / 255.0, 10, normalize=normalize, g=2)
         for m in range(M):
             t_m = model_ls[m](normalize(adv_inp))
             err[m] += (t_m.max(1)[1] != targets).sum().item()
@@ -53,15 +59,15 @@ def osp_iter(epoch, alpha, lr_scheduler, osp_loader, model_ls, normalize, osp_lr
         n += targets.size(0)
         pbar_dic = OrderedDict()
         pbar_dic['Adv Acc'] = '{:2.2f}'.format(
-            100. * (1-sum(err*alpha.cpu().numpy())/n))
+            100. * ( 1 - torch.sum(err*alpha) / n))
         pbar.set_postfix(pbar_dic)
-        alpha = alpha if isinstance(alpha, torch.Tensor)  else torch.from_numpy(alpha)
+        # alpha = alpha if isinstance(alpha, torch.Tensor)  else torch.from_numpy(alpha)
 
     grad = err / n
     return grad
 
 
-def tuning_alpha(epoch, total_epochs, lr_scheduler, alpha, osp_loader, models, dataset, osp_freq=10, osp_lr_max=10, debug_mode=False):
+def tuning_alpha(epoch, total_epochs, lr_scheduler, alpha, osp_loader, models, dataset, osp_freq=10, osp_lr_max=10, debug_mode=False, attack='apgd'):
     if epoch >= (total_epochs // 2) and ((epoch - total_epochs // 2 + 1) % osp_freq == 0 or epoch == total_epochs - 1) or debug_mode:
         for iteration in range(0, len(models)):
             if iteration > 2:
@@ -73,18 +79,19 @@ def tuning_alpha(epoch, total_epochs, lr_scheduler, alpha, osp_loader, models, d
                     normalize = get_normalize_layer(dataset)
                     # sub-gradient of eta(alpha_t)
                     g_t = osp_iter(t, alpha, lr_scheduler,
-                                   osp_loader, models, normalize, osp_lr_max)
-                    eta_t = sum(g_t * alpha.cpu().numpy())  # eta(alpha_t)
+                                   osp_loader, models, normalize, osp_lr_max, attack = attack, debug_mode=debug_mode)
+                    eta_t = sum(g_t * alpha)  # eta(alpha_t)
                     if eta_t <= eta_best:
                         t_best = t
-                        prob_best = np.copy(alpha.cpu().numpy())
+                        prob_best = alpha.clone()
                         eta_best = eta_t
                     print(
                         "best acc = {:2.2f} @ alpha_best = ".format(100.*(1-eta_best)) + arr_to_str(prob_best))
                     alpha = proj_onto_simplex(
-                        alpha.cpu().numpy() - osp_lr * g_t)
+                        alpha - osp_lr * g_t)
                 print('==> End OSP routine, final alpha=' + arr_to_str(prob_best))
-                alpha = torch.from_numpy(np.copy(prob_best))  # update alpha
+                # alpha = torch.from_numpy(np.copy(prob_best))  # update alpha
+                alpha = prob_best.clone() # update alpha
 
 
 def PGD(models, inputs, labels, eps):
@@ -207,7 +214,7 @@ def TRS_Trainer(args, loader: DataLoader, models, criterion, optimizer: Optimize
         ensemble = Ensemble(models, alpha, True)
         # OSP Algorithm - This caused the performance problem
         tuning_alpha(epoch, args.epochs, scheduler, alpha, osp_loader, models,
-                     args.dataset, osp_freq=args.osp_freq, debug_mode=args.debug == 1)
+                     args.dataset, osp_freq=args.osp_freq, attack = args.attack, debug_mode=args.debug == 1)
 
         logits = ensemble(inputs)
 

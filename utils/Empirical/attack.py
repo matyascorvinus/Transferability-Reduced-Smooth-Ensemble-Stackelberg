@@ -18,9 +18,9 @@ def expected_acc(models, prob, x, y, normalize, reduction='mean'):
 
 # ARC attack from [https://arxiv.org/pdf/2206.06737.pdf], with modified option for randomized order looping over the classifiers
 # TODO: Adaptive PGD implementation - MNIST
-def arc_attack(models, x_clean, label, alpha, epsilon = 8 / 255.0, step_size = 2 / 255.0, \
+def arc_attack(models, x_clean, label, prob, epsilon = 8 / 255.0, step_size = 2 / 255.0, \
                 attack_iter=10, rand=False, normalize=None, g = 1, restarts = 1, use_rand_loop=True):
-    prob = alpha.cpu().numpy()
+    # alpha is the probability of each classifier - prob variable
     for net in models:
         net.eval()
     M = len(prob)
@@ -40,14 +40,16 @@ def arc_attack(models, x_clean, label, alpha, epsilon = 8 / 255.0, step_size = 2
             delta_min.uniform_(-epsilon / 2, epsilon / 2)
 
         delta_min = clamp(delta_min, lower_limit-x_clean, upper_limit-x_clean)
-        I = np.flip(np.argsort(prob))
+        # I = np.flip(np.argsort(prob))
+        I = torch.argsort(prob, descending=True)
         for k in range(attack_iter):
             if use_rand_loop:
-                I = np.random.choice(M, M, replace=False, p=prob)
+                # I = np.random.choice(M, M, replace=False, p=prob)
+                I = torch.multinomial(prob, M, replacement=False)
             delta_local = torch.zeros_like(x_clean).cuda()
             loss_min_local = loss_min.clone()
-            for i in I:
-                model_i = models[i]
+            for i, value in enumerate(I):
+                model_i = models[value]
                 delta = (delta_min + delta_local).clone()
                 delta.requires_grad = True
                 out = model_i(normalize(x_clean + delta))
@@ -83,7 +85,7 @@ def arc_attack(models, x_clean, label, alpha, epsilon = 8 / 255.0, step_size = 2
                 beta = beta * beta_m
 
 
-                if i != I[0] and (custom_beta == True): # not the first classifier in the ensemble
+                if value != I[0] and (custom_beta == True): # not the first classifier in the ensemble
                     vec_dot = (g_2.view(g_2.size(0), -1) * delta_local.view(delta_local.size(0), -1)).sum(dim = 1)
                     beta_c = (beta_m) / (beta_m - zeta +1e-10) * (torch.abs(-vec_dot + zeta)) + rho
                     beta[zeta<beta_m] = beta_c[zeta < beta_m]
@@ -116,11 +118,13 @@ def arc_attack(models, x_clean, label, alpha, epsilon = 8 / 255.0, step_size = 2
 
 
 # adaptive PGD attack from [https://arxiv.org/pdf/2206.03362.pdf], which averages the post-softmax outputs, using the MCE loss
-def apgd_attack(models, x_clean, label, prob, epsilon = 8 / 255.0, step_size = 2 / 255.0, attack_iter=10, other_weight=0., rand=True, inv=False, num_classes=10, normalize=None):
+def apgd_attack(models, x_clean, label, prob, epsilon = 8 / 255.0, step_size = 2 / 255.0, \
+                attack_iter=10, other_weight=0., rand=True, inv=False, num_classes=10, normalize=None):
+     
     criterion = torch.nn.CrossEntropyLoss().to(torch.device('cuda'))
     for net in models:
         net.eval()
-    x = x_clean.detach()
+    x = x_clean
     if rand:
         x = x + torch.zeros_like(x_clean).uniform_(-epsilon / 2, epsilon / 2)
         x = torch.clamp(x, 0., 1.)

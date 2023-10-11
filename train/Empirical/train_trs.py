@@ -71,6 +71,7 @@ parser.add_argument('--osp_epochs', "--oe", type=int, default=10)
 parser.add_argument('--osp_freq', "--of", type=int, default=10)
 parser.add_argument('--osp_lr_max', "--olr", type=float, default=10) 
 parser.add_argument('--debug', "--debug", type=int, default=0) 
+parser.add_argument('--attack', "--attack", default='apgd', type=str ) 
 
 args = parser.parse_args()
 
@@ -141,9 +142,9 @@ def main():
     writer = SummaryWriter(args.outdir)
 
     if (args.resume):
-        base_classifier = "logs/Empirical/scratch/" + args.dataset + "/vanilla/checkpoint.pth.tar"
+        base_classifier = args.outdir.replace("resume", "scratch") + "checkpoint.pth.tar"
         print(base_classifier)
-        for i in range(3):
+        for i in range(args.num_models):
             checkpoint = torch.load(base_classifier + ".%d" % (i))
             print("Load " + base_classifier + ".%d" % (i))
             model[i].load_state_dict(checkpoint['state_dict'])
@@ -152,8 +153,7 @@ def main():
 
     for epoch in range(args.epochs):
 
-        TRS_Trainer(args, train_loader, model, criterion, optimizer, epoch, device, osp_loader, scheduler, writer, alpha )
-        print('alpha', alpha)
+        TRS_Trainer(args, train_loader, model, criterion, optimizer, epoch, device, osp_loader, scheduler, writer, alpha ) 
         test(test_loader, model, criterion, epoch, device, writer, alpha = alpha, required_alpha=True)
         evaltrans(args, test_loader, model, criterion, epoch, device, writer)
 
