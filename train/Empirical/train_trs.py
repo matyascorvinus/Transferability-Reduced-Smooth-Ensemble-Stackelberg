@@ -52,6 +52,8 @@ parser.add_argument('--num-models', type=int, required=True)
 
 parser.add_argument('--resume', action='store_true',
                     help='if true, tries to resume training from existing checkpoint')
+parser.add_argument('--resume_epoch', type=int, default=0,
+                    help='if true, tries to resume training from existing checkpoint')
 parser.add_argument('--adv-training', action='store_true')
 parser.add_argument('--epsilon', default=512, type=float)
 parser.add_argument('--num-steps', default=4, type=int)
@@ -90,11 +92,11 @@ else:
 args.epsilon /= 256.0
 
 if (args.resume):
-    args.outdir = "resume" + args.outdir
+    args.outdir = "scratch" + args.outdir
 else:
     args.outdir = "scratch" + args.outdir
 
-args.outdir = "logs/Empirical/" + args.outdir
+args.outdir = "logs/Empirical/" + args.attack+ "/" + args.outdir
 
 
 def main():
@@ -142,7 +144,7 @@ def main():
     writer = SummaryWriter(args.outdir)
 
     if (args.resume):
-        base_classifier = args.outdir.replace("resume", "scratch") + "checkpoint.pth.tar"
+        base_classifier = args.outdir + "checkpoint.pth.tar"
         print(base_classifier)
         for i in range(args.num_models):
             checkpoint = torch.load(base_classifier + ".%d" % (i))
@@ -152,10 +154,16 @@ def main():
         print("Loaded...")
 
     for epoch in range(args.epochs):
-
+        if args.resume:
+            if epoch < args.resume_epoch:
+                continue
         TRS_Trainer(args, train_loader, model, criterion, optimizer, epoch, device, osp_loader, scheduler, writer, alpha ) 
         test(test_loader, model, criterion, epoch, device, writer, alpha = alpha, required_alpha=True)
-        evaltrans(args, test_loader, model, criterion, epoch, device, writer)
+        # evaltrans(args, test_loader, model, criterion, epoch, device, writer)
+        
+        # only evaluate for every 20 epoch
+        if(epoch % 20 == 0):
+            evaltrans(args, test_loader, model, criterion, epoch, device, writer)
 
         scheduler.step(epoch)
 
