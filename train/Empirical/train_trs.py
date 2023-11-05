@@ -129,6 +129,9 @@ def main():
         model.append(submodel)
     print("Model loaded")
     alpha = torch.ones(args.num_models, device='cuda') / args.num_models
+    distributed_attacker = torch.ones(args.num_models, device='cuda') / args.num_models
+    distributed_ensemble = torch.ones(args.num_models, device='cuda') / args.num_models
+    
 
     criterion = nn.CrossEntropyLoss().cuda()
 
@@ -161,8 +164,8 @@ def main():
         test(test_loader, model, criterion, epoch, device, writer, alpha = alpha, required_alpha=True)
         # evaltrans(args, test_loader, model, criterion, epoch, device, writer)
         
-        # only evaluate for every 20 epoch
-        if(epoch % 20 == 0):
+        # only evaluate for every 40 epoch
+        if(epoch % 40 == 0):
             evaltrans(args, test_loader, model, criterion, epoch, device, writer)
 
         scheduler.step(epoch)

@@ -67,14 +67,14 @@ def osp_iter(epoch, alpha, lr_scheduler, osp_loader, model_ls, normalize, osp_lr
     return grad
 
 
-def tuning_alpha(epoch, total_epochs, lr_scheduler, alpha, osp_loader, models, dataset, osp_freq=10, osp_lr_max=10, debug_mode=False, attack='apgd'):
-    if epoch >= (total_epochs // 2) and ((epoch - total_epochs // 2 + 1) % osp_freq == 0 or epoch == total_epochs - 1) or debug_mode:
+def tuning_alpha(epoch, total_epochs, lr_scheduler, alpha, osp_loader, models, dataset, osp_freq=10, osp_lr_max=10, debug_mode=False, attack='apgd', osp_epoch = 2):
+    if (epoch >= (total_epochs // 2) and ((epoch) % osp_freq == 0 or epoch == total_epochs - 1)) or debug_mode:
         for iteration in range(0, len(models)):
-            if iteration > 2:
+            # if iteration > 2:
                 eta_best = 1
                 osp_lr_init = osp_lr_max * lr_scheduler.get_lr()[0]
                 print('==> Begin OSP routine, starting alpha=' + arr_to_str(alpha))
-                for t in range(total_epochs):
+                for t in range(osp_epoch):
                     osp_lr = osp_lr_init / (t + 1)
                     normalize = get_normalize_layer(dataset)
                     # sub-gradient of eta(alpha_t)
@@ -92,6 +92,7 @@ def tuning_alpha(epoch, total_epochs, lr_scheduler, alpha, osp_loader, models, d
                 print('==> End OSP routine, final alpha=' + arr_to_str(prob_best))
                 # alpha = torch.from_numpy(np.copy(prob_best))  # update alpha
                 alpha = prob_best.clone() # update alpha
+        print('==> End tuning alpha via OSP routine, final alpha=' + arr_to_str(prob_best))
 
 
 def PGD(models, inputs, labels, eps):
@@ -212,9 +213,6 @@ def TRS_Trainer(args, loader: DataLoader, models, criterion, optimizer: Optimize
             (args.coeff * cos_loss + args.lamda * smooth_loss)
         # alpha = 1 / num_models
         ensemble = Ensemble(models, alpha, True)
-        # OSP Algorithm - This caused the performance problem
-        tuning_alpha(epoch, args.epochs, scheduler, alpha, osp_loader, models,
-                     args.dataset, osp_freq=args.osp_freq, attack = args.attack, debug_mode=args.debug == 1)
 
         logits = ensemble(inputs)
 
@@ -225,9 +223,7 @@ def TRS_Trainer(args, loader: DataLoader, models, criterion, optimizer: Optimize
         top5.update(acc5.item(), batch_size)
         cos_losses.update(cos_loss.item(), batch_size)
         smooth_losses.update(smooth_loss.item(), batch_size)
-        # cos01_losses.update(cos01.item(), batch_size)
-        # cos02_losses.update(cos02.item(), batch_size)
-        # cos12_losses.update(cos12.item(), batch_size)
+        
         for index, combination in list_of_combination:
             cos_losses_array[index].update(cos_array[index].item(), batch_size)
 
@@ -251,6 +247,10 @@ def TRS_Trainer(args, loader: DataLoader, models, criterion, optimizer: Optimize
             if i >= 10 and args.debug == 1:
                 break
 
+
+    # OSP Algorithm - This caused the performance problem
+    tuning_alpha(epoch, args.epochs, scheduler, alpha, osp_loader, models,
+                    args.dataset, osp_freq=args.osp_freq, attack = args.attack, debug_mode=args.debug == 1)
     writer.add_scalar('train/batch_time', batch_time.avg, epoch)
     writer.add_scalar('train/acc@1', top1.avg, epoch)
     writer.add_scalar('train/acc@5', top5.avg, epoch)

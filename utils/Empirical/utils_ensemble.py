@@ -175,10 +175,71 @@ def evaltrans(args, loader, models, criterion, epoch, device, writer=None):
 	cos_losses_array = []
 	list_of_combination = Combinator(args.num_models)
 	for index, combination in list_of_combination:
-		cos_losses_array.append(AverageMeter())
-	# cos01_losses = AverageMeter()
-	# cos02_losses = AverageMeter()
-	# cos12_losses = AverageMeter()
+		cos_losses_array.append(AverageMeter()) 
+
+	for _, (inputs, targets) in enumerate(loader):
+
+		inputs, targets = inputs.to(device), targets.to(device)
+		batch_size = inputs.size(0)
+		inputs.requires_grad = True
+		grads = []
+		for j in range(args.num_models):
+			logits = models[j](inputs)
+			loss = criterion(logits, targets)
+			grad = autograd.grad(loss, inputs, create_graph=True)[0]
+			grad = grad.flatten(start_dim=1)
+			grads.append(grad)
+
+		cos_loss = 0
+		cos_array = []
+		for combination in list_of_combination:
+			cos_array.append(
+				Cosine(grads[combination[0]], grads[combination[1]]))
+		cos_loss = sum(cos_array) / len(cos_array) 
+		for index, combination in list_of_combination:
+			cos_losses_array[index].update(cos_array[index].item(), batch_size)
+	adv = []
+	for i in range(len(models)):
+		curmodel = models[i]
+		adversary = LinfPGDAttack(
+			curmodel, loss_fn=criterion, eps=args.adv_eps,
+			nb_iter=50, eps_iter=args.adv_eps / 10, rand_init=True, clip_min=0., clip_max=1.,
+			targeted=False)
+		adv.append(adversary)
+
+
+	trans = np.zeros((len(models), len(models)))
+	for i in range(len(models)):
+		test_iter = tqdm(loader, desc='Batch', leave=False, position=2)
+		_, label, pred, advpred = attack_whole_dataset(adv[i], test_iter, device="cuda")
+		for j in range(len(models)):
+			for r in range((_.size(0) - 1) // 200 + 1):
+				inputc = _[r * 200: min((r + 1) * 200, _.size(0))]
+				y = label[r * 200: min((r + 1) * 200, _.size(0))]
+				__ = adv[j].predict(inputc)
+				output = (__).max(1, keepdim=False)[1]
+				trans[i][j] += (output == y).sum().item()
+			trans[i][j] /= len(label)
+			print(i, j, trans[i][j])
+
+	plot_buf = gen_plot((1. - trans) * 100.)
+	image = PIL.Image.open(plot_buf)
+	image = ToTensor()(image)
+	writer.add_image('TransferImage', image, epoch) 
+	for index, combination in list_of_combination:
+		writer.add_scalar('train/cos_{}'.format(combination),
+							cos_losses_array[index].avg, epoch)
+
+
+def evaltrans_robust_ensemble_attack(args, loader, models, criterion, epoch, device, writer=None):
+
+	for i in range(len(models)):
+		models[i].eval()
+
+	cos_losses_array = []
+	list_of_combination = Combinator(args.num_models)
+	for index, combination in list_of_combination:
+		cos_losses_array.append(AverageMeter()) 
 
 	for _, (inputs, targets) in enumerate(loader):
 
@@ -199,15 +260,9 @@ def evaltrans(args, loader, models, criterion, epoch, device, writer=None):
 			cos_array.append(
 				Cosine(grads[combination[0]], grads[combination[1]]))
 		cos_loss = sum(cos_array) / len(cos_array)
-		# cos01 = Cosine(grads[0], grads[1])
-		# cos02 = Cosine(grads[0], grads[2])
-		# cos12 = Cosine(grads[1], grads[2])
-		# cos01_losses.update(cos01.item(), batch_size)
-		# cos02_losses.update(cos02.item(), batch_size)
-		# cos12_losses.update(cos12.item(), batch_size)
 		for index, combination in list_of_combination:
 			cos_losses_array[index].update(cos_array[index].item(), batch_size)
-
+	# TODO: Ap dung thuat toan cho nay
 	adv = []
 	for i in range(len(models)):
 		curmodel = models[i]
@@ -216,6 +271,38 @@ def evaltrans(args, loader, models, criterion, epoch, device, writer=None):
 			nb_iter=50, eps_iter=args.adv_eps / 10, rand_init=True, clip_min=0., clip_max=1.,
 			targeted=False)
 		adv.append(adversary)
+	
+# # Assuming the following are defined:
+# # f: your model
+# # theta: parameters of your model
+# # delta: function to compute the perturbation
+# # loss_fn: your loss function
+# # D: your dataset
+# # lambdas: your lambda values
+
+# # Initialize weights
+# w = torch.randn((m,), requires_grad=True)
+
+# # Define optimizer
+# optimizer = optim.Adam([w], lr=0.01)
+
+# # Optimization loop
+# for epoch in range(num_epochs):
+#     expected_loss = 0.0
+#     for x, y in D:  # Iterate over the dataset
+#         optimizer.zero_grad()
+#         for i in range(m):  # Iterate over each f_i
+#             # Compute the perturbed input
+#             x_perturbed = x + delta(x, w)
+#             # Compute the output of the model
+#             output = f[i](x_perturbed, theta[i])
+#             # Compute the loss
+#             loss = lambdas[i] * loss_fn(output, y)
+#             expected_loss += loss.item()
+#         # Backward pass and optimization
+#         expected_loss.backward()
+#         optimizer.step()
+#     print(f'Epoch {epoch+1}, Expected Loss: {expected_loss/len(D)}')
 
 	trans = np.zeros((len(models), len(models)))
 	for i in range(len(models)):
@@ -235,12 +322,10 @@ def evaltrans(args, loader, models, criterion, epoch, device, writer=None):
 	image = PIL.Image.open(plot_buf)
 	image = ToTensor()(image)
 	writer.add_image('TransferImage', image, epoch)
-	# writer.add_scalar('test/cos01', cos01_losses.avg, epoch)
-	# writer.add_scalar('test/cos02', cos02_losses.avg, epoch)
-	# writer.add_scalar('test/cos12', cos12_losses.avg, epoch)
 	for index, combination in list_of_combination:
 		writer.add_scalar('train/cos_{}'.format(combination),
 							cos_losses_array[index].avg, epoch)
+
 
 
 def test(loader, models, criterion, epoch, device, writer=None, print_freq=10, alpha = 1/3, required_alpha = False):
