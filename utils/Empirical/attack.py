@@ -148,5 +148,4 @@ def apgd_attack(models, x_clean, label, prob, epsilon = 8 / 255.0, step_size = 2
         x = torch.min(torch.max(x, x_clean - epsilon), x_clean + epsilon)
         x = torch.clamp(x, 0., 1.)
     return x
-
-# Chay TRS truoc de train cac mo hinh - xong roi update alpha theo bai so 2
+ 

@@ -7,7 +7,7 @@ import numpy as np
 from collections import OrderedDict
 from tqdm import tqdm
 from utils.Empirical.third_party.distillation import Linf_distillation
-from utils.Empirical.utils_ensemble import Cosine, Magnitude, Combinator
+from utils.Empirical.utils_ensemble import Cosine, Magnitude, Combinator, evaltrans_robust_ensemble_attack
 from models.ensemble import Ensemble
 from utils.Empirical.utils_ensemble import AverageMeter, accuracy, test, copy_code, requires_grad_
 import torch
@@ -19,6 +19,8 @@ import torch.nn.functional as F
 import torch.autograd as autograd
 import sys
 import os
+from advertorch.attacks import GradientSignAttack, LinfBasicIterativeAttack, LinfPGDAttack, LinfMomentumIterativeAttack, \
+    CarliniWagnerL2Attack, JacobianSaliencyMapAttack
 
 currentdir = os.path.dirname(os.path.realpath(__file__))
 parentdir = os.path.dirname(os.path.dirname(currentdir))
@@ -127,7 +129,7 @@ def PGD(models, inputs, labels, eps):
 
 
 def TRS_Trainer(args, loader: DataLoader, models, criterion, optimizer: Optimizer,
-                epoch: int, device: torch.device, osp_loader, scheduler, writer=None, alpha=1/3):
+                epoch: int, device: torch.device, osp_loader, scheduler, writer=None, alpha=1/3, distributed_attacker=None):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
@@ -147,7 +149,7 @@ def TRS_Trainer(args, loader: DataLoader, models, criterion, optimizer: Optimize
     for i in range(args.num_models):
         models[i].train()
         requires_grad_(models[i], True)
-
+    last_index_loader = len(loader) - 1
     for i, (inputs, targets) in enumerate(loader):
         # measure data loading time
         data_time.update(time.time() - end)
@@ -195,7 +197,7 @@ def TRS_Trainer(args, loader: DataLoader, models, criterion, optimizer: Optimize
                 outputs = models[j](adv_x)
                 loss = criterion(outputs, targets)
                 grad = autograd.grad(loss, adv_x, create_graph=True)[0]
-                grad = grad.flatten(start_dim=1)
+                grad = grad.flatten(start_dim=1) * alpha[j]
                 smooth_loss += Magnitude(grad)
 
         else:
@@ -204,18 +206,24 @@ def TRS_Trainer(args, loader: DataLoader, models, criterion, optimizer: Optimize
                 outputs = models[j](inputs)
                 loss = criterion(outputs, targets)
                 grad = autograd.grad(loss, inputs, create_graph=True)[0]
-                grad = grad.flatten(start_dim=1)
+                grad = grad.flatten(start_dim=1) * alpha[j]
                 smooth_loss += Magnitude(grad)
 
-        smooth_loss /= 3
+        # smooth_loss /= args.num_models
 
         loss = loss_std + args.scale * \
             (args.coeff * cos_loss + args.lamda * smooth_loss)
+            
+        
         # alpha = 1 / num_models
         ensemble = Ensemble(models, alpha, True)
 
         logits = ensemble(inputs)
 
+        # if (epoch % 10 == 0 or i == last_index_loader):
+        #     evaltrans_robust_ensemble_attack(args, loader, models, criterion,
+        #                                       optimizer, epoch, device, distributed_attacker, alpha, loss, writer)
+        
         # measure accuracy and record loss
         acc1, acc5 = accuracy(logits, targets, topk=(1, 5))
         losses.update(loss.item(), batch_size)
@@ -223,7 +231,172 @@ def TRS_Trainer(args, loader: DataLoader, models, criterion, optimizer: Optimize
         top5.update(acc5.item(), batch_size)
         cos_losses.update(cos_loss.item(), batch_size)
         smooth_losses.update(smooth_loss.item(), batch_size)
+        for index, combination in list_of_combination:
+            cos_losses_array[index].update(cos_array[index].item(), batch_size)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        # measure elapsed time
+        batch_time.update(time.time() - end)
+        end = time.time()
+
+        if i % args.print_freq == 0:
+            print('Epoch: [{0}][{1}/{2}]\t'
+                  'Time {batch_time.avg:.3f}\t'
+                  'Data {data_time.avg:.3f}\t'
+                  'Loss {loss.avg:.4f}\t'
+                  'Acc@1 {top1.avg:.3f}\t'
+                  'Acc@5 {top5.avg:.3f}'.format(
+                      epoch, i, len(loader), batch_time=batch_time,
+                      data_time=data_time, loss=losses, top1=top1, top5=top5))
+            if i >= 10 and args.debug == 1:
+                break
+
+
+    # OSP Algorithm - This caused the performance problem
+    tuning_alpha(epoch, args.epochs, scheduler, alpha, osp_loader, models,
+                    args.dataset, osp_freq=args.osp_freq, attack = args.attack, debug_mode=args.debug == 1)
+    writer.add_scalar('train/batch_time', batch_time.avg, epoch)
+    writer.add_scalar('train/acc@1', top1.avg, epoch)
+    writer.add_scalar('train/acc@5', top5.avg, epoch)
+    writer.add_scalar('train/loss', losses.avg, epoch)
+    writer.add_scalar('train/cos_loss', cos_losses.avg, epoch)
+    writer.add_scalar('train/smooth_loss', smooth_losses.avg, epoch)
+    # writer.add_scalar('train/cos01', cos01_losses.avg, epoch)
+    # writer.add_scalar('train/cos02', cos02_losses.avg, epoch)
+    # writer.add_scalar('train/cos12', cos12_losses.avg, epoch)
+    for index, combination in list_of_combination:
+        writer.add_scalar('train/cos_{}'.format(combination),
+                          cos_losses_array[index].avg, epoch)
+
+
+
+def TRS_Trainer_Robust_Ensemble(args, loader: DataLoader, models, criterion, optimizer: Optimizer,
+                epoch: int, device: torch.device, osp_loader, scheduler, writer=None, alpha=1/3, distributed_attacker=None):
+    batch_time = AverageMeter()
+    data_time = AverageMeter()
+    losses = AverageMeter()
+    top1 = AverageMeter()
+    top5 = AverageMeter()
+    cos_losses = AverageMeter()
+    smooth_losses = AverageMeter()
+    # cos01_losses = AverageMeter()
+    # cos02_losses = AverageMeter()
+    # cos12_losses = AverageMeter()
+    cos_losses_array = []
+    list_of_combination = Combinator(args.num_models)
+    for index, combination in list_of_combination:
+        cos_losses_array.append(AverageMeter())
+    end = time.time()
+
+    for i in range(args.num_models):
+        models[i].train()
+        requires_grad_(models[i], True)
+    last_index_loader = len(loader) - 1
+    for i, (inputs, targets) in enumerate(loader):
+        # measure data loading time
+        data_time.update(time.time() - end)
+
+        inputs, targets = inputs.to(device), targets.to(device)
+        batch_size = inputs.size(0)
+        inputs.requires_grad = True
+        grads = []
+        loss_std = 0
+        for j in range(args.num_models):
+            logits = models[j](inputs)
+            loss = criterion(logits, targets)
+            grad = autograd.grad(loss, inputs, create_graph=True)[0]
+            grad = grad.flatten(start_dim=1)
+            grads.append(grad)
+            loss_std += loss
+
+        cos_loss, smooth_loss = 0, 0 
+
+        cos_array = []
+        for combination in list_of_combination:
+            cos_array.append(
+                Cosine(grads[combination[0]], grads[combination[1]]))
+        cos_loss = sum(cos_array) / len(cos_array)
+
+        N = inputs.shape[0] // 2
+        cureps = (args.adv_eps - args.init_eps) * \
+            epoch / args.epochs + args.init_eps 
+        clean_inputs = inputs[:N].detach()
+        adv_inputs = PGD(models, inputs[N:], targets[N:], cureps).detach()
+
+        adv_x = torch.cat([clean_inputs, adv_inputs])
+
+        adv_x.requires_grad = True
+
+        if (args.plus_adv):
+            for j in range(args.num_models):
+                outputs = models[j](adv_x)
+                loss = criterion(outputs, targets)
+                grad = autograd.grad(loss, adv_x, create_graph=True)[0]
+                grad = grad.flatten(start_dim=1) * alpha[j]
+                smooth_loss += Magnitude(grad)
+
+        else:
+            # grads = []
+            for j in range(args.num_models):
+                outputs = models[j](inputs)
+                loss = criterion(outputs, targets)
+                grad = autograd.grad(loss, inputs, create_graph=True)[0]
+                grad = grad.flatten(start_dim=1) * alpha[j]
+                smooth_loss += Magnitude(grad)
+
+        # smooth_loss /= args.num_models
+        attack_smooth_loss = torch.zeros(len(models), device='cuda')  
+        if (epoch % 5 == 0 or i == last_index_loader):
+            adversaries = [GradientSignAttack, LinfBasicIterativeAttack, LinfPGDAttack,\
+                        LinfMomentumIterativeAttack, CarliniWagnerL2Attack, JacobianSaliencyMapAttack]  
+            adv = [] 
+            I = torch.argsort(alpha, descending=True)
+            I_attacker = torch.argsort(distributed_attacker, descending=True)
+            assert len(I) == len(I_attacker) 
+            trans = np.zeros((len(I), len(I_attacker)))
+            for i, value in enumerate(I):
+                curmodel = models[value] 
+                adversary = adversaries[I_attacker[i]](
+                    curmodel, loss_fn=criterion, eps=args.adv_eps,
+                    nb_iter=50, eps_iter=args.adv_eps / 10, rand_init=True, clip_min=0., clip_max=1.,
+                    targeted=False)
+                adv.append(adversary) 
+
+            trans = np.zeros(len(models), len(adv))
+            for i in range(args.num_models): 
+                for j in range(len(adv)): 
+                    adversary = adversaries[j](
+                        models[i], loss_fn=criterion, eps=args.adv_eps,
+                        nb_iter=50, eps_iter=args.adv_eps / 10, rand_init=True, clip_min=0., clip_max=1.,
+                        targeted=False)
+                    adv_untargeted = adversary.perturb(inputs, targets)
+                    # outputs = predict_from_logits(models[i](adv_untargeted))
+                    outputs = models[i].predict(adv_untargeted)
+                    loss = criterion(outputs, targets)
+                    grad = autograd.grad(loss, adv_untargeted, create_graph=True)[0]
+                    grad = grad.flatten(start_dim=1) * distributed_attacker[j]
+                    attack_smooth_loss[i] += Magnitude(grad)  
         
+
+        loss = sum(attack_smooth_loss) + loss_std + args.scale * \
+            (args.coeff * cos_loss + args.lamda * smooth_loss)
+        
+        # alpha = 1 / num_models
+        ensemble = Ensemble(models, alpha, True)
+
+        logits = ensemble(inputs)
+            
+        
+        # measure accuracy and record loss
+        acc1, acc5 = accuracy(logits, targets, topk=(1, 5))
+        losses.update(loss.item(), batch_size)
+        top1.update(acc1.item(), batch_size)
+        top5.update(acc5.item(), batch_size)
+        cos_losses.update(cos_loss.item(), batch_size)
+        smooth_losses.update(smooth_loss.item(), batch_size)
         for index, combination in list_of_combination:
             cos_losses_array[index].update(cos_array[index].item(), batch_size)
 

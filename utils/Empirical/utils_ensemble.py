@@ -20,7 +20,9 @@ import matplotlib.pyplot as plt
 from advertorch.attacks import GradientSignAttack, LinfBasicIterativeAttack, LinfPGDAttack, LinfMomentumIterativeAttack, \
     CarliniWagnerL2Attack, JacobianSaliencyMapAttack
 from advertorch.attacks.utils import attack_whole_dataset
+from advertorch.utils import predict_from_logits
 from models.ensemble import Ensemble
+import random
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -231,100 +233,61 @@ def evaltrans(args, loader, models, criterion, epoch, device, writer=None):
 							cos_losses_array[index].avg, epoch)
 
 
-def evaltrans_robust_ensemble_attack(args, loader, models, criterion, epoch, device, writer=None):
-
-	for i in range(len(models)):
-		models[i].eval()
-
-	cos_losses_array = []
-	list_of_combination = Combinator(args.num_models)
-	for index, combination in list_of_combination:
-		cos_losses_array.append(AverageMeter()) 
-
-	for _, (inputs, targets) in enumerate(loader):
-
-		inputs, targets = inputs.to(device), targets.to(device)
-		batch_size = inputs.size(0)
-		inputs.requires_grad = True
-		grads = []
-		for j in range(args.num_models):
-			logits = models[j](inputs)
-			loss = criterion(logits, targets)
-			grad = autograd.grad(loss, inputs, create_graph=True)[0]
-			grad = grad.flatten(start_dim=1)
-			grads.append(grad)
-
-		cos_loss = 0
-		cos_array = []
-		for combination in list_of_combination:
-			cos_array.append(
-				Cosine(grads[combination[0]], grads[combination[1]]))
-		cos_loss = sum(cos_array) / len(cos_array)
-		for index, combination in list_of_combination:
-			cos_losses_array[index].update(cos_array[index].item(), batch_size)
+def evaltrans_robust_ensemble_attack(args, loader, models, criterion, optimizer, epoch, device, distributed_attacker, distributed_ensemble, loss_trs, writer=None):
 	# TODO: Ap dung thuat toan cho nay
-	adv = []
-	for i in range(len(models)):
-		curmodel = models[i]
-		adversary = LinfPGDAttack(
+	adversaries = [GradientSignAttack, LinfBasicIterativeAttack, LinfPGDAttack,\
+				 LinfMomentumIterativeAttack, CarliniWagnerL2Attack, JacobianSaliencyMapAttack]  
+	adv = [] 
+	I = torch.argsort(distributed_ensemble, descending=True)
+	I_attacker = torch.argsort(distributed_attacker, descending=True)
+	assert len(I) == len(I_attacker) 
+	trans = np.zeros((len(I), len(I_attacker)))
+	for i, value in enumerate(I):
+		curmodel = models[value] 
+		adversary = adversaries[I_attacker[i]](
 			curmodel, loss_fn=criterion, eps=args.adv_eps,
 			nb_iter=50, eps_iter=args.adv_eps / 10, rand_init=True, clip_min=0., clip_max=1.,
 			targeted=False)
-		adv.append(adversary)
-	
-# # Assuming the following are defined:
-# # f: your model
-# # theta: parameters of your model
-# # delta: function to compute the perturbation
-# # loss_fn: your loss function
-# # D: your dataset
-# # lambdas: your lambda values
+		adv.append(adversary) 
 
-# # Initialize weights
-# w = torch.randn((m,), requires_grad=True)
+	trans = np.zeros(len(models), len(adv))
+	for j, (inputs, targets) in enumerate(loader):
+		smooth_loss = 0 
+		for i, value in enumerate(I): 
+			adv_untargeted = adv[I_attacker[i]].perturb(inputs, targets)
+			# outputs = predict_from_logits(models[i](adv_untargeted))
+			outputs = models[I[i]].predict(adv_untargeted)
+			loss = criterion(outputs, targets)
+			grad = autograd.grad(loss, adv_untargeted, create_graph=True)[0]
+			grad = grad.flatten(start_dim=1) * distributed_attacker[i]
+			smooth_loss += Magnitude(grad) 
+			trans[i][j] += loss
+		trans[i][I_attacker[i]] /= len(targets)
+		
+		smooth_loss += loss_trs 
+		optimizer.zero_grad()
+		smooth_loss.backward()
+		optimizer.step()
+		print("Smooth loss: ", smooth_loss.item())
+		find_the_equilibrium(trans, distributed_ensemble, distributed_attacker)
 
-# # Define optimizer
-# optimizer = optim.Adam([w], lr=0.01)
 
-# # Optimization loop
-# for epoch in range(num_epochs):
-#     expected_loss = 0.0
-#     for x, y in D:  # Iterate over the dataset
-#         optimizer.zero_grad()
-#         for i in range(m):  # Iterate over each f_i
-#             # Compute the perturbed input
-#             x_perturbed = x + delta(x, w)
-#             # Compute the output of the model
-#             output = f[i](x_perturbed, theta[i])
-#             # Compute the loss
-#             loss = lambdas[i] * loss_fn(output, y)
-#             expected_loss += loss.item()
-#         # Backward pass and optimization
-#         expected_loss.backward()
-#         optimizer.step()
-#     print(f'Epoch {epoch+1}, Expected Loss: {expected_loss/len(D)}')
+def normalize(distribution):
+    total = sum(distribution)
+    if total == 0:
+        return np.array([1 / len(distribution)] * len(distribution))
+    return np.array([float(i) / total for i in distribution])
 
-	trans = np.zeros((len(models), len(models)))
-	for i in range(len(models)):
-		test_iter = tqdm(loader, desc='Batch', leave=False, position=2)
-		_, label, pred, advpred = attack_whole_dataset(adv[i], test_iter, device="cuda")
-		for j in range(len(models)):
-			for r in range((_.size(0) - 1) // 200 + 1):
-				inputc = _[r * 200: min((r + 1) * 200, _.size(0))]
-				y = label[r * 200: min((r + 1) * 200, _.size(0))]
-				__ = adv[j].predict(inputc)
-				output = (__).max(1, keepdim=False)[1]
-				trans[i][j] += (output == y).sum().item()
-			trans[i][j] /= len(label)
-			print(i, j, trans[i][j])
+def find_the_equilibrium(payoff_matrix, distribution_ensemble, distribution_attackers): 
+    for _ in range(1000):  # Number of iterations; adjust as necessary
+        # Update distribution_ensemble based on distribution_attackers
+        learner_scores = payoff_matrix.dot(distribution_attackers)
+        distribution_ensemble = normalize(np.exp(-learner_scores))  # Using exponential for smooth adjustments
 
-	plot_buf = gen_plot((1. - trans) * 100.)
-	image = PIL.Image.open(plot_buf)
-	image = ToTensor()(image)
-	writer.add_image('TransferImage', image, epoch)
-	for index, combination in list_of_combination:
-		writer.add_scalar('train/cos_{}'.format(combination),
-							cos_losses_array[index].avg, epoch)
+        # Update distribution_attackers based on distribution_ensemble
+        attacker_scores = payoff_matrix.T.dot(distribution_ensemble)
+        distribution_attackers = normalize(np.exp(-attacker_scores))  # Using exponential for smooth adjustments
+ 
 
 
 
@@ -403,3 +366,33 @@ def proj_onto_simplex(x):
 
 def Combinator(length_models, combination_size = 2):
 	return np.array(list(itertools.combinations(range(length_models), combination_size)))
+
+def PGD(models, inputs, labels, eps):
+    steps = 6
+    alpha = eps / 3.
+
+    adv = inputs.detach() + torch.FloatTensor(inputs.shape).uniform_(-eps, eps).cuda()
+    adv = torch.clamp(adv, 0, 1)
+    criterion = nn.CrossEntropyLoss()
+
+    adv.requires_grad = True
+    for _ in range(steps):
+        # adv.requires_grad_()
+        grad_loss = 0
+        for i, m in enumerate(models):
+            loss = criterion(m(adv), labels)
+            grad = autograd.grad(loss, adv, create_graph=True)[0]
+            grad = grad.flatten(start_dim=1)
+            grad_loss += Magnitude(grad)
+
+        grad_loss /= 3
+        grad_loss.backward()
+        sign_grad = adv.grad.data.sign()
+        with torch.no_grad():
+            adv.data = adv.data + alpha * sign_grad
+            adv.data = torch.max(
+                torch.min(adv.data, inputs + eps), inputs - eps)
+            adv.data = torch.clamp(adv.data, 0., 1.)
+
+    adv.grad = None
+    return adv.detach()

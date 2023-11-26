@@ -23,8 +23,13 @@ from utils.Empirical.utils_ensemble import AverageMeter, accuracy, test, copy_co
 from utils.Empirical.datasets import get_dataset, get_normalize_layer
 from utils.Empirical.attack import arc_attack
 from utils.Empirical.architectures import get_architecture
-from train.Empirical.trainer import TRS_Trainer 
+from train.Empirical.trainer import TRS_Trainer, TRS_Trainer_Robust_Ensemble
 
+def check_num_models(value):
+    ivalue = int(value)
+    if ivalue > 6:
+        raise argparse.ArgumentTypeError("--num-models cannot be bigger than 6")
+    return ivalue
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
@@ -48,9 +53,12 @@ parser.add_argument('--weight-decay', '--wd', default=1e-4, type=float,
                     metavar='W', help='weight decay (default: 1e-4)')
 parser.add_argument('--print-freq', default=10, type=int,
                     metavar='N', help='print frequency (default: 10)')
-parser.add_argument('--num-models', type=int, required=True)
+parser.add_argument('--num-models', type=check_num_models, required=True)
 
 parser.add_argument('--resume', action='store_true',
+                    help='if true, tries to resume training from existing checkpoint')
+
+parser.add_argument('--robust-ensemble-train', action='store_true',
                     help='if true, tries to resume training from existing checkpoint')
 parser.add_argument('--resume_epoch', type=int, default=0,
                     help='if true, tries to resume training from existing checkpoint')
@@ -98,7 +106,6 @@ else:
 
 args.outdir = "logs/Empirical/" + args.attack+ "/" + args.outdir
 
-
 def main():
     if not os.path.exists(args.outdir):
         os.makedirs(args.outdir)
@@ -129,7 +136,9 @@ def main():
         model.append(submodel)
     print("Model loaded")
     alpha = torch.ones(args.num_models, device='cuda') / args.num_models
-    distributed_attacker = torch.ones(args.num_models, device='cuda') / args.num_models
+    # distributed_attacker = torch.ones(args.num_models, device='cuda') / args.num_models
+    distributed_attacker = torch.from_numpy(np.random.dirichlet(np.ones(6), size=1), device='cuda')
+    print("Attacker loaded: ", distributed_attacker)
     distributed_ensemble = torch.ones(args.num_models, device='cuda') / args.num_models
     
 
@@ -146,7 +155,7 @@ def main():
     model_path = os.path.join(args.outdir, 'checkpoint.pth.tar')
     writer = SummaryWriter(args.outdir)
 
-    if (args.resume):
+    if (args.resume or args.robust_ensemble_train):
         base_classifier = args.outdir + "checkpoint.pth.tar"
         print(base_classifier)
         for i in range(args.num_models):
@@ -160,12 +169,15 @@ def main():
         if args.resume:
             if epoch < args.resume_epoch:
                 continue
-        TRS_Trainer(args, train_loader, model, criterion, optimizer, epoch, device, osp_loader, scheduler, writer, alpha ) 
-        test(test_loader, model, criterion, epoch, device, writer, alpha = alpha, required_alpha=True)
-        # evaltrans(args, test_loader, model, criterion, epoch, device, writer)
+        if args.robust_ensemble_train:
+            TRS_Trainer_Robust_Ensemble(args, train_loader, model, criterion, optimizer, epoch, device, osp_loader, scheduler, writer, alpha, distributed_attacker) 
+        else:
+            TRS_Trainer(args, train_loader, model, criterion, optimizer, epoch, device, osp_loader, scheduler, writer, alpha, distributed_attacker) 
         
         # only evaluate for every 40 epoch
+        # evaltrans(args, test_loader, model, criterion, epoch, device, writer)
         if(epoch % 40 == 0):
+            test(test_loader, model, criterion, epoch, device, writer, alpha = alpha, required_alpha=True)
             evaltrans(args, test_loader, model, criterion, epoch, device, writer)
 
         scheduler.step(epoch)
