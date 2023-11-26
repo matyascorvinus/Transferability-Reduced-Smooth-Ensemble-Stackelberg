@@ -20,7 +20,7 @@ import torch.autograd as autograd
 import sys
 import os
 from advertorch.attacks import GradientSignAttack, LinfBasicIterativeAttack, LinfPGDAttack, LinfMomentumIterativeAttack, \
-    CarliniWagnerL2Attack, JacobianSaliencyMapAttack
+    CarliniWagnerL2Attack, GradientAttack
 
 currentdir = os.path.dirname(os.path.realpath(__file__))
 parentdir = os.path.dirname(os.path.dirname(currentdir))
@@ -281,10 +281,7 @@ def TRS_Trainer_Robust_Ensemble(args, loader: DataLoader, models, criterion, opt
     top1 = AverageMeter()
     top5 = AverageMeter()
     cos_losses = AverageMeter()
-    smooth_losses = AverageMeter()
-    # cos01_losses = AverageMeter()
-    # cos02_losses = AverageMeter()
-    # cos12_losses = AverageMeter()
+    smooth_losses = AverageMeter() 
     cos_losses_array = []
     list_of_combination = Combinator(args.num_models)
     for index, combination in list_of_combination:
@@ -303,14 +300,40 @@ def TRS_Trainer_Robust_Ensemble(args, loader: DataLoader, models, criterion, opt
         batch_size = inputs.size(0)
         inputs.requires_grad = True
         grads = []
-        loss_std = 0
-        for j in range(args.num_models):
-            logits = models[j](inputs)
-            loss = criterion(logits, targets)
-            grad = autograd.grad(loss, inputs, create_graph=True)[0]
-            grad = grad.flatten(start_dim=1)
+        attack_loss = torch.zeros(len(models), device='cuda')   
+        adversaries = [GradientSignAttack, LinfBasicIterativeAttack, LinfPGDAttack,\
+                    LinfMomentumIterativeAttack, GradientAttack]  
+        adv = [] 
+        I = torch.argsort(alpha, descending=True)
+        I_attacker = torch.argsort(distributed_attacker, descending=True).squeeze()
+        print("I: ", I)
+        print("I_attacker: ", I_attacker)
+        print("distributed_attacker: ", distributed_attacker)
+        print("alpha: ", alpha) 
+        for i, value in enumerate(I):
+            # curmodel = models[value] 
+            # adversary = adversaries[I_attacker[i]](
+            #     curmodel, loss_fn=criterion, eps=args.adv_eps,
+            #     nb_iter=50, eps_iter=args.adv_eps / 10, rand_init=True, clip_min=0., clip_max=1.,
+            #     targeted=False)
+            adv.append(adversaries[i]) 
+
+        # trans = np.zeros(len(models), len(adversaries))
+        for i in range(args.num_models): 
+            grad = 0
+            for j in range(len(adv)): 
+                adversary = adv[j](
+                    models[i], loss_fn=criterion, eps=args.adv_eps,
+                    clip_min=0., clip_max=1.,
+                    targeted=False)
+                adv_untargeted = adversary.perturb(inputs, targets) 
+                # outputs = predict_from_logits(models[i](adv_untargeted))
+                adv_untargeted.requires_grad = True
+                outputs = models[i](adv_untargeted)
+                loss = criterion(outputs, targets)
+                grad += autograd.grad(loss, adv_untargeted, create_graph=True)[0].flatten(start_dim=1) * distributed_attacker[j]
+                attack_loss[i] += loss * distributed_attacker[j]
             grads.append(grad)
-            loss_std += loss
 
         cos_loss, smooth_loss = 0, 0 
 
@@ -320,6 +343,7 @@ def TRS_Trainer_Robust_Ensemble(args, loader: DataLoader, models, criterion, opt
                 Cosine(grads[combination[0]], grads[combination[1]]))
         cos_loss = sum(cos_array) / len(cos_array)
 
+
         N = inputs.shape[0] // 2
         cureps = (args.adv_eps - args.init_eps) * \
             epoch / args.epochs + args.init_eps 
@@ -328,60 +352,23 @@ def TRS_Trainer_Robust_Ensemble(args, loader: DataLoader, models, criterion, opt
 
         adv_x = torch.cat([clean_inputs, adv_inputs])
 
-        adv_x.requires_grad = True
-
-        if (args.plus_adv):
-            for j in range(args.num_models):
-                outputs = models[j](adv_x)
-                loss = criterion(outputs, targets)
-                grad = autograd.grad(loss, adv_x, create_graph=True)[0]
-                grad = grad.flatten(start_dim=1) * alpha[j]
-                smooth_loss += Magnitude(grad)
-
-        else:
-            # grads = []
-            for j in range(args.num_models):
-                outputs = models[j](inputs)
-                loss = criterion(outputs, targets)
-                grad = autograd.grad(loss, inputs, create_graph=True)[0]
-                grad = grad.flatten(start_dim=1) * alpha[j]
-                smooth_loss += Magnitude(grad)
-
-        # smooth_loss /= args.num_models
-        attack_smooth_loss = torch.zeros(len(models), device='cuda')  
-        if (epoch % 5 == 0 or i == last_index_loader):
-            adversaries = [GradientSignAttack, LinfBasicIterativeAttack, LinfPGDAttack,\
-                        LinfMomentumIterativeAttack, CarliniWagnerL2Attack, JacobianSaliencyMapAttack]  
-            adv = [] 
-            I = torch.argsort(alpha, descending=True)
-            I_attacker = torch.argsort(distributed_attacker, descending=True)
-            assert len(I) == len(I_attacker) 
-            trans = np.zeros((len(I), len(I_attacker)))
-            for i, value in enumerate(I):
-                curmodel = models[value] 
-                adversary = adversaries[I_attacker[i]](
-                    curmodel, loss_fn=criterion, eps=args.adv_eps,
-                    nb_iter=50, eps_iter=args.adv_eps / 10, rand_init=True, clip_min=0., clip_max=1.,
+        adv_x.requires_grad = True 
+        for i in range(args.num_models): 
+            grad = 0
+            for j in range(len(adv)): 
+                adversary = adv[j](
+                    models[i], loss_fn=criterion, eps=args.adv_eps,
+                    clip_min=0., clip_max=1.,
                     targeted=False)
-                adv.append(adversary) 
-
-            trans = np.zeros(len(models), len(adv))
-            for i in range(args.num_models): 
-                for j in range(len(adv)): 
-                    adversary = adversaries[j](
-                        models[i], loss_fn=criterion, eps=args.adv_eps,
-                        nb_iter=50, eps_iter=args.adv_eps / 10, rand_init=True, clip_min=0., clip_max=1.,
-                        targeted=False)
-                    adv_untargeted = adversary.perturb(inputs, targets)
-                    # outputs = predict_from_logits(models[i](adv_untargeted))
-                    outputs = models[i].predict(adv_untargeted)
-                    loss = criterion(outputs, targets)
-                    grad = autograd.grad(loss, adv_untargeted, create_graph=True)[0]
-                    grad = grad.flatten(start_dim=1) * distributed_attacker[j]
-                    attack_smooth_loss[i] += Magnitude(grad)  
-        
-
-        loss = sum(attack_smooth_loss) + loss_std + args.scale * \
+                adv_untargeted = adversary.perturb(inputs, targets) 
+                # outputs = predict_from_logits(models[i](adv_untargeted))
+                adv_untargeted.requires_grad = True
+                outputs = models[i](adv_untargeted)
+                loss = criterion(outputs, targets)
+                grad += autograd.grad(loss, adv_untargeted, create_graph=True)[0].flatten(start_dim=1) * distributed_attacker[j]
+            smooth_loss += Magnitude(grad)
+        # smooth_loss /= args.num_models
+        loss = sum(attack_loss) + args.scale * \
             (args.coeff * cos_loss + args.lamda * smooth_loss)
         
         # alpha = 1 / num_models

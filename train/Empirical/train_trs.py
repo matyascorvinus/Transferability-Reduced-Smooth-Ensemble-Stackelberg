@@ -27,8 +27,8 @@ from train.Empirical.trainer import TRS_Trainer, TRS_Trainer_Robust_Ensemble
 
 def check_num_models(value):
     ivalue = int(value)
-    if ivalue > 6:
-        raise argparse.ArgumentTypeError("--num-models cannot be bigger than 6")
+    if ivalue > 5:
+        raise argparse.ArgumentTypeError("--num-models cannot be bigger than 5")
     return ivalue
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -135,9 +135,10 @@ def main():
         submodel = nn.DataParallel(submodel)
         model.append(submodel)
     print("Model loaded")
-    alpha = torch.ones(args.num_models, device='cuda') / args.num_models
+    alpha = torch.ones(args.num_models, device=device) / args.num_models
     # distributed_attacker = torch.ones(args.num_models, device='cuda') / args.num_models
-    distributed_attacker = torch.from_numpy(np.random.dirichlet(np.ones(6), size=1), device='cuda')
+    distributed_attacker = torch.from_numpy(np.random.dirichlet(np.ones(args.num_models), size=1)).squeeze()
+    distributed_attacker = distributed_attacker.to(device)
     print("Attacker loaded: ", distributed_attacker)
     distributed_ensemble = torch.ones(args.num_models, device='cuda') / args.num_models
     
