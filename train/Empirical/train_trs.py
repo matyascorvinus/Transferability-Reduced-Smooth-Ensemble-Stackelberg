@@ -156,7 +156,7 @@ def main():
     model_path = os.path.join(args.outdir, 'checkpoint.pth.tar')
     writer = SummaryWriter(args.outdir)
 
-    if (args.resume or args.robust_ensemble_train):
+    if (args.resume):
         base_classifier = args.outdir + "checkpoint.pth.tar"
         print(base_classifier)
         for i in range(args.num_models):

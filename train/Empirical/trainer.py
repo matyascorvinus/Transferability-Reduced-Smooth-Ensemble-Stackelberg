@@ -251,6 +251,8 @@ def TRS_Trainer(args, loader: DataLoader, models, criterion, optimizer: Optimize
                   'Acc@5 {top5.avg:.3f}'.format(
                       epoch, i, len(loader), batch_time=batch_time,
                       data_time=data_time, loss=losses, top1=top1, top5=top5))
+            # create log file to save the print command above
+            
             if i >= 10 and args.debug == 1:
                 break
 
@@ -271,6 +273,72 @@ def TRS_Trainer(args, loader: DataLoader, models, criterion, optimizer: Optimize
         writer.add_scalar('train/cos_{}'.format(combination),
                           cos_losses_array[index].avg, epoch)
 
+# Define L_sim(x, f, f_i's, delta_j's, eta):
+#   Initialize similarity_loss to 0
+
+#   # Calculate the gradient of f with respect to the input x for each attack model
+#   gradients_of_f = [Compute gradient of f with respect to x + delta_j(x; w_j) for each delta_j in delta_j's]
+
+#   # Loop over each attack model and its corresponding distribution weight
+#   For each j in range of attack models:
+#     # Loop over each previously generated learner model
+#     For each i in range of previously generated learner models:
+#       # Calculate the gradient of the i-th learner model with respect to the input x
+#       gradient_of_f_i = Compute gradient of f_i with respect to x + delta_j(x; w_j)
+      
+#       # Compute the cosine similarity between gradients of f and f_i for attack model j
+#       cosine_similarity = Dot product of gradients_of_f[j] and gradient_of_f_i
+#                          / (Norm of gradients_of_f[j] * Norm of gradient_of_f_i)
+
+#       # Ensure that the cosine similarity is between -1 and 1
+#       cosine_similarity = Clamp cosine_similarity between -1 and 1
+
+#       # Add the weighted cosine similarity to the similarity_loss
+#       # eta[j] is the weight of the j-th attack model in the distribution
+#       similarity_loss += eta[j] * Absolute value of cosine_similarity
+
+#   # Return the accumulated similarity loss
+#   Return similarity_loss
+
+
+# Define L_smooth(x, f, delta_j's, eta):
+#   Initialize smoothness_loss to 0
+
+#   # Calculate the gradient of f with respect to the input x for each attack model
+#   gradients_of_f = [Compute gradient of f with respect to x + delta_j(x; w_j) for each delta_j in delta_j's]
+
+#   # Loop over each attack model and its corresponding distribution weight
+#   For each j in range of attack models:
+#     # Compute the norm of the gradient of f for attack model j
+#     norm_gradient = Compute the norm of gradients_of_f[j]
+
+#     # Add the weighted norm to the smoothness_loss
+#     # eta[j] is the weight of the j-th attack model in the distribution
+#     smoothness_loss += eta[j] * norm_gradient
+
+#   # Return the accumulated smoothness loss
+#   Return smoothness_loss
+
+# --> Better L_smooth
+# Define L_smooth(x, f, delta_j's, eta):
+#   Initialize smoothness_loss to 0
+
+#   # Calculate the gradient of f with respect to the input x for each attack model
+#   For each attack model delta_j in delta_j's:
+#     perturbed_input = x + delta_j(x; w_j) # Apply the j-th attack to the input
+#     gradient_of_f = Compute gradient of f with respect to perturbed_input
+
+#     # Compute the norm (L2) of the gradient of f for the current attack
+#     norm_gradient = Compute the L2 norm of gradient_of_f
+
+#     # Multiply the norm by the corresponding weight from the attack distribution eta
+#     weighted_norm = eta[j] * norm_gradient
+
+#     # Accumulate the weighted norm to the smoothness_loss
+#     smoothness_loss += weighted_norm
+
+#   # Return the total smoothness loss
+#   Return smoothness_loss
 
 
 def TRS_Trainer_Robust_Ensemble(args, loader: DataLoader, models, criterion, optimizer: Optimizer,
@@ -300,43 +368,45 @@ def TRS_Trainer_Robust_Ensemble(args, loader: DataLoader, models, criterion, opt
         batch_size = inputs.size(0)
         inputs.requires_grad = True
         grads = []
-        attack_loss = torch.zeros(len(models), device='cuda')   
+        # attack_loss = torch.zeros(len(models), device='cuda')   
+        attack_loss = 0
         adversaries = [GradientSignAttack, LinfBasicIterativeAttack, LinfPGDAttack,\
                     LinfMomentumIterativeAttack, GradientAttack]  
         adv = [] 
         I = torch.argsort(alpha, descending=True)
         I_attacker = torch.argsort(distributed_attacker, descending=True).squeeze()
-        print("I: ", I)
-        print("I_attacker: ", I_attacker)
-        print("distributed_attacker: ", distributed_attacker)
-        print("alpha: ", alpha) 
-        for i, value in enumerate(I):
-            # curmodel = models[value] 
-            # adversary = adversaries[I_attacker[i]](
-            #     curmodel, loss_fn=criterion, eps=args.adv_eps,
-            #     nb_iter=50, eps_iter=args.adv_eps / 10, rand_init=True, clip_min=0., clip_max=1.,
-            #     targeted=False)
-            adv.append(adversaries[i]) 
-
-        # trans = np.zeros(len(models), len(adversaries))
-        for i in range(args.num_models): 
-            grad = 0
-            for j in range(len(adv)): 
-                adversary = adv[j](
-                    models[i], loss_fn=criterion, eps=args.adv_eps,
-                    clip_min=0., clip_max=1.,
-                    targeted=False)
-                adv_untargeted = adversary.perturb(inputs, targets) 
-                # outputs = predict_from_logits(models[i](adv_untargeted))
-                adv_untargeted.requires_grad = True
-                outputs = models[i](adv_untargeted)
-                loss = criterion(outputs, targets)
-                grad += autograd.grad(loss, adv_untargeted, create_graph=True)[0].flatten(start_dim=1) * distributed_attacker[j]
-                attack_loss[i] += loss * distributed_attacker[j]
-            grads.append(grad)
+        # print("I: ", I)
+        # print("I_attacker: ", I_attacker)
+        # print("distributed_attacker: ", distributed_attacker)
+        # print("alpha: ", alpha) 
 
         cos_loss, smooth_loss = 0, 0 
 
+        for index, value in enumerate(I):
+            # curmodel = models[value] 
+            # adversary = adversaries[I_attacker[index]](
+            #     curmodel, loss_fn=criterion, eps=args.adv_eps,
+            #     nb_iter=50, eps_iter=args.adv_eps / 10, rand_init=True, clip_min=0., clip_max=1.,
+            #     targeted=False)
+            adv.append(adversaries[index]) 
+
+        # trans = np.zeros(len(models), len(adversaries))
+            
+        # cos_loss
+        for index in range(args.num_models): 
+            grad = 0
+            for j in range(len(adv)): 
+                adversary = adv[j](
+                    models[index], loss_fn=criterion, eps=args.adv_eps,
+                    clip_min=0., clip_max=1.,
+                    targeted=False)
+                adv_untargeted = adversary.perturb(inputs, targets)  
+                adv_untargeted.requires_grad = True
+                outputs = models[index](adv_untargeted)
+                loss = criterion(outputs, targets)
+                grad += autograd.grad(loss, adv_untargeted, create_graph=True)[0].flatten(start_dim=1) * distributed_attacker[j]
+                attack_loss += loss * distributed_attacker[j]
+            grads.append(grad)
         cos_array = []
         for combination in list_of_combination:
             cos_array.append(
@@ -353,22 +423,23 @@ def TRS_Trainer_Robust_Ensemble(args, loader: DataLoader, models, criterion, opt
         adv_x = torch.cat([clean_inputs, adv_inputs])
 
         adv_x.requires_grad = True 
-        for i in range(args.num_models): 
+
+        # smooth_loss
+        for index in range(args.num_models): 
             grad = 0
             for j in range(len(adv)): 
                 adversary = adv[j](
-                    models[i], loss_fn=criterion, eps=args.adv_eps,
+                    models[index], loss_fn=criterion, eps=args.adv_eps,
                     clip_min=0., clip_max=1.,
                     targeted=False)
-                adv_untargeted = adversary.perturb(inputs, targets) 
-                # outputs = predict_from_logits(models[i](adv_untargeted))
+                adv_untargeted = adversary.perturb(inputs, targets)  
                 adv_untargeted.requires_grad = True
-                outputs = models[i](adv_untargeted)
+                outputs = models[index](adv_untargeted)
                 loss = criterion(outputs, targets)
                 grad += autograd.grad(loss, adv_untargeted, create_graph=True)[0].flatten(start_dim=1) * distributed_attacker[j]
             smooth_loss += Magnitude(grad)
         # smooth_loss /= args.num_models
-        loss = sum(attack_loss) + args.scale * \
+        loss = (attack_loss) + args.scale * \
             (args.coeff * cos_loss + args.lamda * smooth_loss)
         
         # alpha = 1 / num_models
